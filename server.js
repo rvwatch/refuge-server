@@ -4,7 +4,8 @@ var app = express();
 var config = require('./config/app.json');
 var fs = require('fs');
 var session = require('express-session');
-var passport = require('passport'), LocalStrategy = require('passport-local').Strategy;
+var passport = require('passport'),
+  LocalStrategy = require('passport-local').Strategy;
 var Fitbit = require('fitbit-oauth2');
 var port = process.env.PORT || 3000;
 const { Client } = require('pg');
@@ -17,9 +18,10 @@ const client = new Client({
 
 app.use(
   bodyParser.urlencoded({
-    extended: false
+    extended: true
   })
 );
+
 app.use(bodyParser.json());
 app.use(
   session({
@@ -44,32 +46,27 @@ app.use(function(req, res, next) {
   next();
 });
 
-passport.use(new LocalStrategy(
-  function(username, password, done) {
-    console.log("attempting to log " +  username + " in");
-    
-    if(username == 'rick' && password == "1234") {
-      return done(null, {username: 'rick'});
-    }
-    else {
-      return done(null, false, { message: 'You can not log in brother.' });
-    }
-    // User.findOne({ username: username }, function(err, user) {
-    //   if (err) { return done(err); }
-    //   if (!user) {
-    //     return done(null, false, { message: 'Incorrect username.' });
-    //   }
-    //   if (!user.validPassword(password)) {
-    //     return done(null, false, { message: 'Incorrect password.' });
-    //   }
-    //   return done(null, user);
-    // });
-  }
-));
-
 app.get('/', function(req, res, next) {
   console.log(req.user);
   res.send('Yo! servers is runnin shit');
+});
+
+app.get('/db-test', function(req, res, next) {
+  //console.log(req.user);
+  //res.send('hitting DB');
+  client.connect();
+
+  client
+    .query('select * from Users')
+    .then(results => {
+      client.end();
+      res.send(results.rows);
+    })
+    .catch(errs => {
+      client.end();
+      console.log(errs);
+      res.send(errs);
+    });
 });
 
 app.listen(port, function() {
@@ -121,8 +118,6 @@ var fitbit = new Fitbit(config.fitbit);
 app.get('/fitbit', function(req, res, next) {
   res.redirect(fitbit.authorizeURL());
 });
-
-
 
 // Callback service parsing the authorization token and asking for the access token.  This
 // endpoint is refered to in config.fitbit.authorization_uri.redirect_uri.  See example
@@ -191,7 +186,6 @@ app.get('/fb-profile', function(req, res, next) {
 });
 
 app.get('/hr-data', function(req, res, next) {
-  
   let token = persist.read(tfile, function(err, token) {
     if (err) {
       console.log(err);
@@ -255,37 +249,103 @@ app.get('/steps-taken', function(req, res, next) {
   });
 });
 
-app.post('/login', 
+app.post(
+  '/login',
   function(req, res, next) {
     console.log('Posted the post');
-    req.body.data
     res.set('Access-Control-Allow-Origin', 'http://localhost:3001');
     res.set('Access-Control-Allow-Headers', 'Content-Type');
-    // res.set('Content-Type', 'application/json');
-    // res.set('Accept', 'application/json');
     return next();
   },
   passport.authenticate('local'),
   function(req, res) {
-    let user = {error: 'Invalid Credentials'};
+    let user = { error: 'Invalid Credentials' };
     if (req.user) {
+      req.user.password = '';
       user = req.user;
     }
     console.log('sending', user);
     res.send(JSON.stringify(user));
-  });
+  }
+);
 
-  app.get('/logout', function(req, res){
-    console.log('logging out');
-    req.logout();
-    res.send(JSON.stringify({}));
-  });
-
-  app.get('/currentuser', function(req, res) {
-    let user = {};
-    if (req.user) {
-      user = req.user;
+app.post(
+  '/register', function (req, res, next) {
+  passport.authenticate('local-signup', function(err, user) {
+    if (err) {
+      return next(err);
+    } else {
+      return next(null, user)
     }
-    console.log('sending', user);
-    res.send(JSON.stringify(user));
-  });
+  })(req, res, next)
+  }
+);
+
+passport.use(
+  new LocalStrategy(function(email, password, done) {
+    console.log('attempting to log ' + email + ' in');
+    client.connect();
+
+    client
+      .query('select * from Users where email = $1', [email])
+      .then(results => {
+        if (results.rowCount === 1) {
+          client.end();
+          return done(null, results.rows[0]);
+        } else {
+          client.end();
+          return done(null, false, { message: 'Incorrect Email or Password' });
+        }
+      })
+      .catch(errs => {
+        client.end();
+        console.log(errs);
+        return done(null, false, {
+          message: 'Server error, please try again later'
+        });
+      });
+  })
+);
+
+passport.use(
+  'local-signup',
+  new LocalStrategy(
+    {
+      usernameField: 'email',
+      passwordField: 'password',
+      passReqToCallback: true // allows us to pass back the entire request to the callback
+    },
+    function(req, email, password, done) {
+
+      client.connect();
+
+      client
+        .query('select * from Users where email = $1', [email])
+        .then(results => {
+          if (results.rowCount === 1) {
+            client.end();
+            return done('That email is already taken.');
+          } else {
+            client.end();
+            
+            client
+              .query('insert into Users (name, email, password) values ($1, $2, $3)', [req.body.name, email, password])
+              .then(results => {
+                  client.end();
+                  var user = {'name': req.body.name , 'email': email}
+                  return done(null, user);
+              })
+              .catch(errs => {
+                client.end();
+                return done('Registration error, try again later.');
+              });
+          }
+        })
+        .catch(errs => {
+          client.end();
+          console.log(errs);
+          return done('Registration error, try again later.');
+        });
+    }
+  )
+);
